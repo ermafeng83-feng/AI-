@@ -1,0 +1,5 @@
+{
+  "name": "Pig Farm Data Automator",
+  "description": "A specialized tool for pig farm data automation: Excel cleaning, smart filling, scale conversion, and report generation.",
+  "requestFramePermissions": []
+}
