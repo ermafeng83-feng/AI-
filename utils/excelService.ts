@@ -120,7 +120,7 @@ export const cleanData = (longData: LongDataRow[], multiplyBy2: boolean): LongDa
     let status = "正常";
     let finalVal = 0;
 
-    const valStr = String(val).trim();
+    let valStr = String(val).trim();
     
     // Check if tag is already terminated
     if (isTerminated) {
@@ -131,6 +131,14 @@ export const cleanData = (longData: LongDataRow[], multiplyBy2: boolean): LongDa
     if (terminationKeywords.some(k => valStr.includes(k))) {
       isTerminated = true;
       return { ...row, val: NaN, status: valStr };
+    }
+
+    // NEW: Handle arrow adjustments (e.g. "0.8 ↓ 0.4" or "0.8 ↑ 1.2")
+    // Rule: Take the value after the arrow.
+    if (valStr.match(/[↓↑]/)) {
+      const parts = valStr.split(/[↓↑]/);
+      // Take the last segment which represents the new value
+      valStr = parts[parts.length - 1].trim();
     }
 
     const isInvalid = valStr === "" || valStr === "无变化" || valStr === "null" || valStr.toLowerCase() === "nan";
@@ -192,9 +200,98 @@ export const pivotData = (cleanedData: LongDataRow[], dateCols: DateColumn[]): {
   };
 };
 
-export const exportToExcel = (data: any[], fileName: string, sheetName: string = "Data") => {
-  const ws = XLSX.utils.json_to_sheet(data);
+export const convertData = (cleanedData: LongDataRow[], mode: 'direct' | 'custom', formula: string): LongDataRow[] => {
+  if (cleanedData.length === 0) return [];
+
+  return cleanedData.map(row => {
+    // Check for excluded/terminated values (NaN)
+    if (row.val === undefined || (typeof row.val === 'number' && isNaN(row.val))) {
+      return { ...row, convertedVal: NaN };
+    }
+
+    let x = row.val;
+    let y = x;
+
+    if (mode === 'custom' && formula) {
+      try {
+        // Careful: using new Function in client-side app
+        // eslint-disable-next-line no-new-func
+        const func = new Function('x', `return ${formula};`);
+        y = func(x);
+      } catch (e) {
+        console.warn("Formula error", e);
+        y = x;
+      }
+    }
+    return { ...row, convertedVal: Math.round(y * 100) / 100 };
+  });
+};
+
+export const calculateStatisticsUtil = (
+  wideData: WideDataRow[], 
+  dates: string[], 
+  method: string
+): { updatedWideData: WideDataRow[], stats: { totalPigs: number, totalVal: number, avgVal: number, daysCount: number } } => {
+  if (wideData.length === 0) return { 
+    updatedWideData: [], 
+    stats: { totalPigs: 0, totalVal: 0, avgVal: 0, daysCount: 0 } 
+  };
+
+  let grandTotal = 0;
+  let validPigsCount = 0;
+
+  const updatedWideData = wideData.map(row => {
+    // Filter valid numbers for the dates
+    // This excludes NaN which is set for "空栏", "死亡", etc.
+    const values = dates.map(d => row[d]).filter(v => typeof v === 'number' && !isNaN(v));
+    let result = 0;
+    
+    if (values.length > 0) {
+      validPigsCount++; // Only count pigs that have at least one valid data point
+      switch (method) {
+        case 'SUM': result = values.reduce((a, b) => a + b, 0); break;
+        case 'AVG': result = values.reduce((a, b) => a + b, 0) / values.length; break;
+        case 'MAX': result = Math.max(...values); break;
+        case 'MIN': result = Math.min(...values); break;
+        case 'DIFF': result = values[0] - values[values.length - 1]; break; // First - Last
+      }
+    }
+    result = Math.round(result * 100) / 100;
+    grandTotal += result;
+    return { ...row, statResult: result };
+  });
+
+  return {
+    updatedWideData,
+    stats: {
+      totalPigs: validPigsCount,
+      totalVal: parseFloat(grandTotal.toFixed(2)),
+      avgVal: validPigsCount > 0 ? parseFloat((grandTotal / validPigsCount).toFixed(2)) : 0,
+      daysCount: dates.length
+    }
+  };
+};
+
+interface ExportMetadata {
+  sourceFileName: string;
+  daysCount: number;
+}
+
+export const exportToExcel = (data: any[], fileName: string, metadata?: ExportMetadata) => {
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  
+  // 1. Convert JSON to Sheet, starting at A3 to leave room for headers
+  const ws = XLSX.utils.json_to_sheet([]);
+  XLSX.utils.sheet_add_json(ws, data, { origin: "A3" });
+
+  // 2. Add Custom Metadata Headers at the top if provided
+  if (metadata) {
+    XLSX.utils.sheet_add_aoa(ws, [
+      ["原始文件:", metadata.sourceFileName, "统计天数:", metadata.daysCount],
+      [] // Empty row for spacing
+    ], { origin: "A1" });
+  }
+
+  XLSX.utils.book_append_sheet(wb, ws, "统计结果");
   XLSX.writeFile(wb, fileName);
 };

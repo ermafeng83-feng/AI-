@@ -1,15 +1,26 @@
 import React, { useState, useCallback, useMemo } from 'react';
-import { Upload, FileSpreadsheet, ArrowRight, Settings2, Calculator, Save, RefreshCw, BarChart3, PiggyBank, RotateCcw, Trash2, CheckCircle2 } from 'lucide-react';
+import { Upload, FileSpreadsheet, ArrowRight, Settings2, Calculator, Save, RefreshCw, BarChart3, PiggyBank, RotateCcw, Trash2, CheckCircle2, CalendarDays } from 'lucide-react';
 import { StepCard } from './components/StepCard';
 import { Button } from './components/Button';
 import { DataTable } from './components/DataTable';
-import { parseExcelFile, identifyColumns, transformToLongFormat, cleanData, pivotData, exportToExcel } from './utils/excelService';
-import { LongDataRow, WideDataRow, DateColumn, StatMethod } from './types';
+import { LoadingOverlay } from './components/LoadingOverlay';
+import { 
+  parseExcelFile, 
+  identifyColumns, 
+  transformToLongFormat, 
+  cleanData, 
+  pivotData, 
+  exportToExcel,
+  convertData,
+  calculateStatisticsUtil
+} from './utils/excelService';
+import { LongDataRow, WideDataRow, DateColumn, StatMethod, AppConfig, StatisticsResult } from './types';
 
 function App() {
   // App State
   const [currentStep, setCurrentStep] = useState(0);
   const [resetKey, setResetKey] = useState(0);
+  const [isLoading, setIsLoading] = useState(false);
   
   // Data State
   const [rawData, setRawData] = useState<any[]>([]);
@@ -28,13 +39,16 @@ function App() {
   const [statMethod, setStatMethod] = useState<StatMethod>('SUM');
   
   // Stats
-  const [summaryStats, setSummaryStats] = useState({ totalPigs: 0, totalVal: 0, avgVal: 0 });
+  const [summaryStats, setSummaryStats] = useState<StatisticsResult>({ totalPigs: 0, totalVal: 0, avgVal: 0, daysCount: 0 });
+
+  // --- Actions ---
 
   // STEP 0: Upload
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
+    setIsLoading(true);
     try {
       setFileName(file.name);
       const { rawData, rawHeaders } = await parseExcelFile(file);
@@ -42,6 +56,8 @@ function App() {
       setRawHeaders(rawHeaders);
     } catch (err: any) {
       alert("文件解析失败: " + err.message);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -62,7 +78,7 @@ function App() {
     setConversionMode('direct');
     setCustomFormula("");
     setStatMethod('SUM');
-    setSummaryStats({ totalPigs: 0, totalVal: 0, avgVal: 0 });
+    setSummaryStats({ totalPigs: 0, totalVal: 0, avgVal: 0, daysCount: 0 });
     setCurrentStep(0);
     setResetKey(prev => prev + 1);
   }, [rawData.length]);
@@ -89,53 +105,38 @@ function App() {
     setCurrentStep(1);
   };
 
-  // STEP 1: Standardization (View Only)
+  // STEP 1: Standardization
   const finishStep1 = () => {
     setCurrentStep(2);
-    // Pre-calculate cleaning with defaults
-    handleRunCleaning(false); // pass current checkbox state which is initially false
+    handleRunCleaning(false); // Default: unchecked
   };
 
   // STEP 2: Cleaning
   const handleRunCleaning = useCallback((multiply: boolean) => {
-    const result = cleanData(longData, multiply);
-    setCleanedData(result);
+    setIsLoading(true);
+    // Use timeout to allow UI to render spinner before heavy calc
+    setTimeout(() => {
+      const result = cleanData(longData, multiply);
+      setCleanedData(result);
+      setIsLoading(false);
+    }, 100);
   }, [longData]);
 
   const finishStep2 = () => {
     setCurrentStep(3);
-    // Pre-calculate conversion with defaults
     handleRunConversion('direct', '');
   };
 
   // STEP 3: Conversion
   const handleRunConversion = useCallback((mode: 'direct' | 'custom', formula: string) => {
     if (cleanedData.length === 0) return;
-
-    const converted = cleanedData.map(row => {
-      // Check for excluded/terminated values (NaN)
-      if (row.val === undefined || (typeof row.val === 'number' && isNaN(row.val))) {
-        return { ...row, convertedVal: NaN };
-      }
-
-      let x = row.val;
-      let y = x;
-
-      if (mode === 'custom' && formula) {
-        try {
-          // Careful: using new Function in client-side app
-          // eslint-disable-next-line no-new-func
-          const func = new Function('x', `return ${formula};`);
-          y = func(x);
-        } catch (e) {
-          console.warn("Formula error", e);
-          y = x;
-        }
-      }
-      return { ...row, convertedVal: Math.round(y * 100) / 100 };
-    });
-
-    setCleanedData(converted); // Update cleaned data with converted values
+    
+    setIsLoading(true);
+    setTimeout(() => {
+      const converted = convertData(cleanedData, mode, formula);
+      setCleanedData(converted);
+      setIsLoading(false);
+    }, 100);
   }, [cleanedData]);
 
   const finishStep3 = () => {
@@ -145,47 +146,94 @@ function App() {
     setCurrentStep(4);
   };
 
-  // STEP 4: Wide Format (View Only)
+  // STEP 4: Wide Format
   const finishStep4 = () => {
-    calculateStatistics(statMethod); // Initial stats
+    // Initial stats with default method
+    calculateStatistics('SUM');
     setCurrentStep(5);
   };
 
   // STEP 5: Statistics
   const calculateStatistics = useCallback((method: StatMethod) => {
      if (wideData.length === 0) return;
-
-     let grandTotal = 0;
-     let validPigsCount = 0;
-
-     const updatedWideData = wideData.map(row => {
-       // Filter valid numbers for the dates
-       // This excludes NaN which is set for "空栏", "死亡", etc.
-       const values = dates.map(d => row[d]).filter(v => typeof v === 'number' && !isNaN(v));
-       let result = 0;
-       
-       if (values.length > 0) {
-         validPigsCount++; // Only count pigs that have at least one valid data point
-         switch (method) {
-           case 'SUM': result = values.reduce((a, b) => a + b, 0); break;
-           case 'AVG': result = values.reduce((a, b) => a + b, 0) / values.length; break;
-           case 'MAX': result = Math.max(...values); break;
-           case 'MIN': result = Math.min(...values); break;
-           case 'DIFF': result = values[0] - values[values.length - 1]; break; // First - Last
-         }
-       }
-       result = Math.round(result * 100) / 100;
-       grandTotal += result;
-       return { ...row, statResult: result };
-     });
-
-     setWideData(updatedWideData);
-     setSummaryStats({
-       totalPigs: validPigsCount,
-       totalVal: parseFloat(grandTotal.toFixed(2)),
-       avgVal: validPigsCount > 0 ? parseFloat((grandTotal / validPigsCount).toFixed(2)) : 0
-     });
+     
+     setIsLoading(true);
+     setTimeout(() => {
+        const { updatedWideData, stats } = calculateStatisticsUtil(wideData, dates, method);
+        setWideData(updatedWideData);
+        setSummaryStats(stats);
+        setIsLoading(false);
+     }, 100);
   }, [wideData, dates]);
+
+  // Save / Load Config
+  const handleSaveConfig = () => {
+    const config: AppConfig = {
+      multiplyBy2,
+      conversionMode,
+      customFormula,
+      statMethod
+    };
+    const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'pig-farm-config.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleLoadConfig = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const config: AppConfig = JSON.parse(e.target?.result as string);
+        
+        // Apply Config
+        setMultiplyBy2(config.multiplyBy2);
+        setConversionMode(config.conversionMode);
+        setCustomFormula(config.customFormula);
+        setStatMethod(config.statMethod);
+
+        // Re-run pipeline if data exists
+        if (longData.length > 0) {
+            setIsLoading(true);
+            setTimeout(() => {
+                // 1. Clean
+                const cleaned = cleanData(longData, config.multiplyBy2);
+                setCleanedData(cleaned);
+                
+                // 2. Convert
+                const converted = convertData(cleaned, config.conversionMode, config.customFormula);
+                setCleanedData(converted);
+
+                // 3. Pivot
+                const { wideData: wd, sortedDates } = pivotData(converted, dateCols);
+                setWideData(wd);
+                setDates(sortedDates);
+
+                // 4. Stats
+                const { updatedWideData, stats } = calculateStatisticsUtil(wd, sortedDates, config.statMethod);
+                setWideData(updatedWideData);
+                setSummaryStats(stats);
+                setIsLoading(false);
+
+                alert("配置已加载并重新计算数据！");
+            }, 100);
+        } else {
+            alert("配置已加载！(上传数据后将应用此配置)");
+        }
+      } catch (err) {
+        alert("配置文件无效");
+      }
+    };
+    reader.readAsText(file);
+    // Reset input
+    event.target.value = '';
+  };
 
   const handleDownload = () => {
     const exportData = wideData.map(row => {
@@ -201,7 +249,12 @@ function App() {
       newRow["统计结果"] = row.statResult;
       return newRow;
     });
-    exportToExcel(exportData, "猪场数据统计表.xlsx");
+    
+    exportToExcel(
+      exportData, 
+      "猪场数据统计表.xlsx",
+      { sourceFileName: fileName, daysCount: summaryStats.daysCount }
+    );
   };
 
   // View Helpers
@@ -211,9 +264,11 @@ function App() {
 
   return (
     <div className="min-h-screen pb-20 selection:bg-blue-100">
+      <LoadingOverlay isLoading={isLoading} />
+      
       {/* Header */}
       <header className="bg-white/80 backdrop-blur-md sticky top-0 z-50 border-b border-slate-200">
-        <div className="max-w-5xl mx-auto px-6 py-4 flex justify-between items-center">
+        <div className="max-w-6xl mx-auto px-6 py-4 flex flex-col md:flex-row justify-between items-center gap-4">
           <div>
             <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-3">
               <div className="bg-blue-600 p-2 rounded-lg text-white shadow-lg shadow-blue-500/30">
@@ -222,9 +277,40 @@ function App() {
               <span>猪场数据自动化处理工具</span>
             </h1>
           </div>
-          <div className="hidden sm:flex items-center gap-2 text-blue-700 bg-blue-50 px-3 py-1.5 rounded-full text-xs font-semibold ring-1 ring-blue-100">
-            <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
-            <span>v1.0.3</span>
+          <div className="flex items-center gap-3">
+             <div className="hidden sm:flex items-center gap-2 text-blue-700 bg-blue-50 px-3 py-1.5 rounded-full text-xs font-semibold ring-1 ring-blue-100 mr-2">
+                <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
+                <span>v1.0.4</span>
+             </div>
+             
+             {/* Config Buttons */}
+             <div className="flex gap-2">
+                <Button 
+                   variant="outline" 
+                   className="py-1.5 px-3 text-xs h-9" 
+                   onClick={handleSaveConfig}
+                   title="保存当前配置"
+                   icon={<Save size={14} />}
+                >
+                   保存配置
+                </Button>
+                <div className="relative">
+                   <input 
+                      type="file" 
+                      accept=".json" 
+                      onChange={handleLoadConfig}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                   />
+                   <Button 
+                      variant="outline" 
+                      className="py-1.5 px-3 text-xs h-9" 
+                      title="加载配置"
+                      icon={<RotateCcw size={14} />}
+                   >
+                      加载配置
+                   </Button>
+                </div>
+             </div>
           </div>
         </div>
       </header>
@@ -281,11 +367,6 @@ function App() {
                        <p className="text-sm text-slate-500">支持 .xlsx, .xls 格式</p>
                     </>
                   )}
-               </div>
-               <div className="pt-2">
-                 <span className="inline-block px-4 py-2 bg-white border border-slate-200 rounded-lg text-sm font-medium text-slate-600 shadow-sm group-hover:border-blue-300 group-hover:text-blue-600 transition-colors">
-                    浏览文件
-                 </span>
                </div>
              </div>
           </div>
@@ -379,7 +460,6 @@ function App() {
                { key: 'status', label: '状态', render: (v) => {
                  let colorClass = 'bg-slate-100 text-slate-600';
                  if (v === '正常') colorClass = 'bg-emerald-50 text-emerald-700 border border-emerald-100';
-                 // Add "空栏" to the red/terminated status check
                  else if (v === '已结束' || ['上产房', '死亡', '淘汰', '空栏'].some(k => v.includes(k))) colorClass = 'bg-rose-50 text-rose-700 border border-rose-100';
                  else colorClass = 'bg-amber-50 text-amber-700 border border-amber-100';
 
@@ -515,13 +595,13 @@ function App() {
           isActive={currentStep === 5} 
           isCompleted={currentStep > 5}
         >
-           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
               <div className="bg-gradient-to-br from-blue-50 to-indigo-50 p-6 rounded-2xl border border-blue-100 flex flex-col items-center relative overflow-hidden group hover:shadow-md transition-all">
                  <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity">
                     <PiggyBank size={64} />
                  </div>
                  <p className="text-xs text-blue-500 font-bold uppercase tracking-wider mb-2">有效猪只数</p>
-                 <p className="text-4xl font-extrabold text-blue-700 tracking-tight">{summaryStats.totalPigs}</p>
+                 <p className="text-3xl font-extrabold text-blue-700 tracking-tight">{summaryStats.totalPigs}</p>
                  <p className="text-[10px] text-blue-400 mt-1">(排除空栏/死亡)</p>
               </div>
               <div className="bg-gradient-to-br from-emerald-50 to-teal-50 p-6 rounded-2xl border border-emerald-100 flex flex-col items-center relative overflow-hidden group hover:shadow-md transition-all">
@@ -529,14 +609,23 @@ function App() {
                     <Calculator size={64} />
                  </div>
                  <p className="text-xs text-emerald-500 font-bold uppercase tracking-wider mb-2">总计算值</p>
-                 <p className="text-4xl font-extrabold text-emerald-700 tracking-tight">{summaryStats.totalVal.toLocaleString()}</p>
+                 <p className="text-3xl font-extrabold text-emerald-700 tracking-tight">{summaryStats.totalVal.toLocaleString()}</p>
               </div>
               <div className="bg-gradient-to-br from-violet-50 to-purple-50 p-6 rounded-2xl border border-violet-100 flex flex-col items-center relative overflow-hidden group hover:shadow-md transition-all">
                  <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity">
                     <BarChart3 size={64} />
                  </div>
                  <p className="text-xs text-violet-500 font-bold uppercase tracking-wider mb-2">平均每头</p>
-                 <p className="text-4xl font-extrabold text-violet-700 tracking-tight">{summaryStats.avgVal}</p>
+                 <p className="text-3xl font-extrabold text-violet-700 tracking-tight">{summaryStats.avgVal}</p>
+              </div>
+              {/* New Days Count Card */}
+              <div className="bg-gradient-to-br from-amber-50 to-orange-50 p-6 rounded-2xl border border-amber-100 flex flex-col items-center relative overflow-hidden group hover:shadow-md transition-all">
+                 <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity">
+                    <CalendarDays size={64} />
+                 </div>
+                 <p className="text-xs text-amber-600 font-bold uppercase tracking-wider mb-2">统计天数</p>
+                 <p className="text-3xl font-extrabold text-amber-700 tracking-tight">{summaryStats.daysCount}</p>
+                 <p className="text-[10px] text-amber-400 mt-1">天</p>
               </div>
            </div>
 

@@ -41,3 +41,17 @@ export interface StepProps {
   stepNumber: number;
   children: React.ReactNode;
 }
+
+export interface StatisticsResult {
+  totalPigs: number;
+  totalVal: number;
+  avgVal: number;
+  daysCount: number;
+}
+
+export interface AppConfig {
+  multiplyBy2: boolean;
+  conversionMode: 'direct' | 'custom';
+  customFormula: string;
+  statMethod: StatMethod;
+}
